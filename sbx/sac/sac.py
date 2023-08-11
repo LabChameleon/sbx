@@ -61,6 +61,7 @@ class SAC(OffPolicyAlgorithmJax):
         gamma: float = 0.99,
         train_freq: Union[int, Tuple[int, str]] = 1,
         gradient_steps: int = 1,
+        target_update_interval: int = 1,
         policy_delay: int = 1,
         action_noise: Optional[ActionNoise] = None,
         replay_buffer_class: Optional[Type[ReplayBuffer]] = None,
@@ -103,6 +104,7 @@ class SAC(OffPolicyAlgorithmJax):
         )
 
         self.policy_delay = policy_delay
+        self.target_update_interval = target_update_interval
         self.ent_coef_init = ent_coef
 
         if _init_setup_model:
@@ -218,6 +220,7 @@ class SAC(OffPolicyAlgorithmJax):
             gradient_steps,
             data,
             policy_delay_indices,
+            self.target_update_interval,
             self.policy.qf_state,
             self.policy.actor_state,
             self.ent_coef_state,
@@ -331,7 +334,7 @@ class SAC(OffPolicyAlgorithmJax):
         return ent_coef_state, ent_coef_loss
 
     @classmethod
-    @partial(jax.jit, static_argnames=["cls", "gradient_steps"])
+    #@partial(jax.jit, static_argnames=["cls", "gradient_steps"])
     def _train(
         cls,
         gamma: float,
@@ -340,6 +343,7 @@ class SAC(OffPolicyAlgorithmJax):
         gradient_steps: int,
         data: ReplayBufferSamplesNp,
         policy_delay_indices: flax.core.FrozenDict,
+        target_update_interval: int,
         qf_state: RLTrainState,
         actor_state: TrainState,
         ent_coef_state: TrainState,
@@ -370,7 +374,6 @@ class SAC(OffPolicyAlgorithmJax):
                 slice(data.dones),
                 key,
             )
-            qf_state = SAC.soft_update(tau, qf_state)
 
             # hack to be able to jit (n_updates % policy_delay == 0)
             if i in policy_delay_indices:
@@ -382,6 +385,9 @@ class SAC(OffPolicyAlgorithmJax):
                     key,
                 )
                 ent_coef_state, _ = SAC.update_temperature(target_entropy, ent_coef_state, entropy)
+
+            if i % target_update_interval == 0:
+                qf_state = SAC.soft_update(tau, qf_state)
 
         return (
             qf_state,

@@ -32,7 +32,7 @@ class Critic(nn.Module):
                 x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=False)
             if self.use_layer_norm:
                 x = nn.LayerNorm()(x)
-            x = nn.relu(x)
+            x = nn.tanh(x)
         x = nn.Dense(1)(x)
         return x
 
@@ -77,7 +77,7 @@ class Actor(nn.Module):
     def __call__(self, x: jnp.ndarray) -> tfd.Distribution:  # type: ignore[name-defined]
         for n_units in self.net_arch:
             x = nn.Dense(n_units)(x)
-            x = nn.relu(x)
+            x = nn.tanh(x)
         mean = nn.Dense(self.action_dim)(x)
         log_std = nn.Dense(self.action_dim)(x)
         log_std = jnp.clip(log_std, self.log_std_min, self.log_std_max)
