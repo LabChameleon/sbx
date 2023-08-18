@@ -190,6 +190,9 @@ class SAC(OffPolicyAlgorithmJax):
         policy_delay_indices = {i: True for i in range(gradient_steps) if ((self._n_updates + i + 1) % self.policy_delay) == 0}
         policy_delay_indices = flax.core.FrozenDict(policy_delay_indices)
 
+        target_update_indices = {i: True for i in range(gradient_steps) if ((self._n_updates + i + 1) % self.target_update_interval) == 0}
+        target_update_indices = flax.core.FrozenDict(target_update_indices)
+
         if isinstance(data.observations, dict):
             keys = list(self.observation_space.keys())
             obs = np.concatenate([data.observations[key].numpy() for key in keys], axis=1)
@@ -220,7 +223,7 @@ class SAC(OffPolicyAlgorithmJax):
             gradient_steps,
             data,
             policy_delay_indices,
-            self.target_update_interval,
+            target_update_indices,
             self.policy.qf_state,
             self.policy.actor_state,
             self.ent_coef_state,
@@ -334,7 +337,7 @@ class SAC(OffPolicyAlgorithmJax):
         return ent_coef_state, ent_coef_loss
 
     @classmethod
-    #@partial(jax.jit, static_argnames=["cls", "gradient_steps"])
+    @partial(jax.jit, static_argnames=["cls", "gradient_steps"])
     def _train(
         cls,
         gamma: float,
@@ -343,51 +346,125 @@ class SAC(OffPolicyAlgorithmJax):
         gradient_steps: int,
         data: ReplayBufferSamplesNp,
         policy_delay_indices: flax.core.FrozenDict,
-        target_update_interval: int,
+        target_update_indices: flax.core.FrozenDict,
         qf_state: RLTrainState,
         actor_state: TrainState,
         ent_coef_state: TrainState,
         key,
     ):
-        actor_loss_value = jnp.array(0)
 
-        for i in range(gradient_steps):
+        # cut data into chunks of size batch_size with numpy
+        data_size = data.observations.shape[0]
+        assert data_size % gradient_steps == 0
+        data = ReplayBufferSamplesNp(
+            observations=jnp.split(data.observations, gradient_steps),
+            actions=jnp.split(data.actions, gradient_steps),
+            next_observations=jnp.split(data.next_observations, gradient_steps),
+            rewards=jnp.split(data.rewards, gradient_steps),
+            dones=jnp.split(data.dones, gradient_steps),
+        )
 
-            def slice(x, step=i):
-                assert x.shape[0] % gradient_steps == 0
-                batch_size = x.shape[0] // gradient_steps
-                return x[batch_size * step : batch_size * (step + 1)]
-
+        @jax.jit
+        def gradient_step(
+            i: int,
+            args: Tuple[
+                int,
+                flax.core.FrozenDict,
+                flax.core.FrozenDict,
+                TrainState,
+                RLTrainState,
+                TrainState,
+                ReplayBufferSamplesNp,
+                Tuple[float, float, float],
+                jax.random.KeyArray,
+            ],
+        ):
             (
+                gamma,
+                policy_delay_indices,
+                target_update_indices,
+                actor_state,
                 qf_state,
-                (qf_loss_value, ent_coef_value),
-                key,
-            ) = SAC.update_critic(
+                ent_coef_state,
+                data,
+                loss,
+                key
+            ) = args
+
+            qf_state, (qf_loss_value, ent_coef_value), key = cls.update_critic(
                 gamma,
                 actor_state,
                 qf_state,
                 ent_coef_state,
-                slice(data.observations),
-                slice(data.actions),
-                slice(data.next_observations),
-                slice(data.rewards),
-                slice(data.dones),
+                jnp.array(data.observations)[0][i],
+                jnp.array(data.actions)[0][i],
+                jnp.array(data.next_observations)[0][i],
+                jnp.array(data.rewards)[0][i],
+                jnp.array(data.dones)[0][i],
                 key,
             )
 
-            # hack to be able to jit (n_updates % policy_delay == 0)
-            if i in policy_delay_indices:
-                (actor_state, qf_state, actor_loss_value, key, entropy) = cls.update_actor(
+            jax.debug.print("out1: {}", jnp.array(data.observations)[0][1])
+            jax.debug.print("out2: {}", jnp.array(data.observations)[0][2])
+
+            actor_loss_value = 0.0
+            #if i in policy_delay_indices:
+            (actor_state, qf_state, actor_loss_value, key, entropy) = cls.update_actor(
                     actor_state,
                     qf_state,
                     ent_coef_state,
-                    slice(data.observations),
+                    jnp.array(data.observations)[0][i],
                     key,
                 )
-                ent_coef_state, _ = SAC.update_temperature(target_entropy, ent_coef_state, entropy)
+            ent_coef_state, _ = SAC.update_temperature(target_entropy, ent_coef_state, entropy)
 
-            if i % target_update_interval == 0:
+            def target_update(input):
+                tau, qf_state = input
+                return SAC.soft_update(tau, qf_state)
+
+            qf_state = jax.lax.cond(i in target_update_indices, target_update, lambda x: x[1], operand=(tau, qf_state))
+
+            if i in target_update_indices.keys():
                 qf_state = SAC.soft_update(tau, qf_state)
+
+            return (
+                gamma,
+                policy_delay_indices,
+                target_update_indices,
+                actor_state,
+                qf_state,
+                ent_coef_state,
+                data,
+                (qf_loss_value, actor_loss_value, ent_coef_value),
+                key
+            )
+
+        (
+            gamma,
+            policy_delay_indices,
+            target_update_indices,
+            actor_state,
+            qf_state,
+            ent_coef_state,
+            data,
+            (qf_loss_value, actor_loss_value, ent_coef_value),
+            key,
+        ) = jax.lax.fori_loop(
+            0,
+            gradient_steps,
+            gradient_step,
+            (
+                gamma,
+                policy_delay_indices,
+                target_update_indices,
+                actor_state,
+                qf_state,
+                ent_coef_state,
+                data,
+                (0, 0, 0),
+                key,
+            ),
+        )
 
         return (
             qf_state,
