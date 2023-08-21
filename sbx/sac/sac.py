@@ -394,7 +394,7 @@ class SAC(OffPolicyAlgorithmJax):
                 key
             ) = args
 
-            qf_state, (qf_loss_value, ent_coef_value), key = SAC.update_critic(
+            qf_state, (qf_loss_value, ent_coef_value), key = cls.update_critic(
                 gamma,
                 actor_state,
                 qf_state,
@@ -410,7 +410,7 @@ class SAC(OffPolicyAlgorithmJax):
             @jax.jit
             def policy_delay_update(input):
                 i, actor_state, qf_state, target_entropy, ent_coef_state, data, key, = input
-                (actor_state, qf_state, actor_loss_value, key, entropy) = SAC.update_actor(
+                (actor_state, qf_state, actor_loss_value, key, entropy) = cls.update_actor(
                     actor_state,
                     qf_state,
                     ent_coef_state,
