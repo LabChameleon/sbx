@@ -356,13 +356,6 @@ class SAC(OffPolicyAlgorithmJax):
         # cut data into chunks of size batch_size with numpy
         data_size = data.observations.shape[0]
         assert data_size % gradient_steps == 0
-        #data = ReplayBufferSamplesNp(
-        #    observations=jnp.stack(jnp.split(data.observations, gradient_steps)),
-        #    actions=jnp.stack(jnp.split(data.actions, gradient_steps)),
-        #    next_observations=jnp.stack(jnp.split(data.next_observations, gradient_steps)),
-        #    rewards=jnp.stack(jnp.split(data.rewards, gradient_steps)),
-        #    dones=jnp.stack(jnp.split(data.dones, gradient_steps)),
-        #)
         def slice(x):
             return x.reshape(gradient_steps, -1, *x.shape[1:])
 
@@ -401,7 +394,7 @@ class SAC(OffPolicyAlgorithmJax):
                 key
             ) = args
 
-            qf_state, (qf_loss_value, ent_coef_value), key = cls.update_critic(
+            qf_state, (qf_loss_value, ent_coef_value), key = SAC.update_critic(
                 gamma,
                 actor_state,
                 qf_state,
@@ -416,8 +409,8 @@ class SAC(OffPolicyAlgorithmJax):
 
             @jax.jit
             def policy_delay_update(input):
-                i, actor_state, qf_state, target_entropy, ent_coef_state, data, key = input
-                (actor_state, qf_state, actor_loss_value, key, entropy) = cls.update_actor(
+                i, actor_state, qf_state, target_entropy, ent_coef_state, data, key, = input
+                (actor_state, qf_state, actor_loss_value, key, entropy) = SAC.update_actor(
                     actor_state,
                     qf_state,
                     ent_coef_state,
