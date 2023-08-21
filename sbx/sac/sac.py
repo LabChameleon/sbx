@@ -187,11 +187,11 @@ class SAC(OffPolicyAlgorithmJax):
         # Pre-compute the indices where we need to update the actor
         # This is a hack in order to jit the train loop
         # It will compile once per value of policy_delay_indices
-        policy_delay_indices = {i: True for i in range(gradient_steps) if ((self._n_updates + i + 1) % self.policy_delay) == 0}
-        policy_delay_indices = flax.core.FrozenDict(policy_delay_indices)
+        policy_delay_indices = [((self._n_updates + i + 1) % self.policy_delay) == 0 for i in range(gradient_steps)]
+        policy_delay_indices = jnp.array(policy_delay_indices)
 
-        target_update_indices = {i: True for i in range(gradient_steps) if ((self._n_updates + i + 1) % self.target_update_interval) == 0}
-        target_update_indices = flax.core.FrozenDict(target_update_indices)
+        target_update_indices = [((self._n_updates + i + 1) % self.target_update_interval) == 0 for i in range(gradient_steps)]
+        target_update_indices = jnp.array(target_update_indices)
 
         if isinstance(data.observations, dict):
             keys = list(self.observation_space.keys())
@@ -356,12 +356,22 @@ class SAC(OffPolicyAlgorithmJax):
         # cut data into chunks of size batch_size with numpy
         data_size = data.observations.shape[0]
         assert data_size % gradient_steps == 0
+        #data = ReplayBufferSamplesNp(
+        #    observations=jnp.stack(jnp.split(data.observations, gradient_steps)),
+        #    actions=jnp.stack(jnp.split(data.actions, gradient_steps)),
+        #    next_observations=jnp.stack(jnp.split(data.next_observations, gradient_steps)),
+        #    rewards=jnp.stack(jnp.split(data.rewards, gradient_steps)),
+        #    dones=jnp.stack(jnp.split(data.dones, gradient_steps)),
+        #)
+        def slice(x):
+            return x.reshape(gradient_steps, -1, *x.shape[1:])
+
         data = ReplayBufferSamplesNp(
-            observations=jnp.split(data.observations, gradient_steps),
-            actions=jnp.split(data.actions, gradient_steps),
-            next_observations=jnp.split(data.next_observations, gradient_steps),
-            rewards=jnp.split(data.rewards, gradient_steps),
-            dones=jnp.split(data.dones, gradient_steps),
+            observations=slice(data.observations),
+            actions=slice(data.actions),
+            next_observations=slice(data.next_observations),
+            rewards=slice(data.rewards),
+            dones=slice(data.dones),
         )
 
         @jax.jit
@@ -396,36 +406,46 @@ class SAC(OffPolicyAlgorithmJax):
                 actor_state,
                 qf_state,
                 ent_coef_state,
-                jnp.array(data.observations)[0][i],
-                jnp.array(data.actions)[0][i],
-                jnp.array(data.next_observations)[0][i],
-                jnp.array(data.rewards)[0][i],
-                jnp.array(data.dones)[0][i],
+                data.observations.at[i].get(),
+                data.actions.at[i].get(),
+                data.next_observations.at[i].get(),
+                data.rewards.at[i].get(),
+                data.dones.at[i].get(),
                 key,
             )
 
-            jax.debug.print("out1: {}", jnp.array(data.observations)[0][1])
-            jax.debug.print("out2: {}", jnp.array(data.observations)[0][2])
-
-            actor_loss_value = 0.0
-            #if i in policy_delay_indices:
-            (actor_state, qf_state, actor_loss_value, key, entropy) = cls.update_actor(
+            @jax.jit
+            def policy_delay_update(input):
+                i, actor_state, qf_state, target_entropy, ent_coef_state, data, key = input
+                (actor_state, qf_state, actor_loss_value, key, entropy) = cls.update_actor(
                     actor_state,
                     qf_state,
                     ent_coef_state,
-                    jnp.array(data.observations)[0][i],
+                    data.observations.at[i].get(),
                     key,
                 )
-            ent_coef_state, _ = SAC.update_temperature(target_entropy, ent_coef_state, entropy)
+                ent_coef_state, _ = SAC.update_temperature(target_entropy, ent_coef_state, entropy)
+                return (
+                    actor_state,
+                    qf_state,
+                    actor_loss_value,
+                    key,
+                    ent_coef_state,
+                )
 
+            actor_state, qf_state, actor_loss_value, key, ent_coef_state = jax.lax.cond(
+                policy_delay_indices.at[i].get(),
+                policy_delay_update,
+                lambda x: (x[1], x[2], 0.0, x[6], x[4]),
+                operand=(i, actor_state, qf_state, target_entropy, ent_coef_state, data, key),
+            )
+
+            @jax.jit
             def target_update(input):
                 tau, qf_state = input
                 return SAC.soft_update(tau, qf_state)
 
-            qf_state = jax.lax.cond(i in target_update_indices, target_update, lambda x: x[1], operand=(tau, qf_state))
-
-            if i in target_update_indices.keys():
-                qf_state = SAC.soft_update(tau, qf_state)
+            qf_state = jax.lax.cond(target_update_indices.at[i].get(), target_update, lambda x: x[1], operand=(tau, qf_state))
 
             return (
                 gamma,
