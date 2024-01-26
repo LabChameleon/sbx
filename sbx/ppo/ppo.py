@@ -239,7 +239,7 @@ class PPO(OnPolicyAlgorithmJax):
         def critic_loss(params):
             # Value loss using the TD(gae_lambda) target
             vf_values = vf_state.apply_fn(params, observations).flatten()
-            return ((returns - vf_values) ** 2).mean()
+            return vf_coef * ((returns - vf_values) ** 2).mean()
 
         vf_loss_value, grads = jax.value_and_grad(critic_loss, has_aux=False)(vf_state.params)
         vf_state = vf_state.apply_gradients(grads=grads)
